@@ -1,0 +1,129 @@
+import os
+import cv2
+import face_recognition
+import numpy as np
+from flask import Flask, request, send_file, render_template_string
+from werkzeug.utils import secure_filename
+
+app = Flask(__name__)
+UPLOAD_FOLDER = 'uploads'
+OUTPUT_FILE = 'static/output_swapped.avi'
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs('static', exist_ok=True)
+
+HTML_TEMPLATE = '''
+<!doctype html>
+<html lang="en">
+<head>
+  <title>AI Face Swap Video Tool</title>
+</head>
+<body>
+  <h2>Upload Source and Target Videos</h2>
+  <form method="post" enctype="multipart/form-data">
+    <label>Source Face Video:</label><br>
+    <input type="file" name="source" required><br><br>
+    <label>Target Video:</label><br>
+    <input type="file" name="target" required><br><br>
+    <input type="submit" value="Swap Faces">
+  </form>
+
+  {% if video_generated %}
+    <h3>Face Swap Complete!</h3>
+    <video width="480" controls>
+      <source src="{{ url_for('static', filename='output_swapped.avi') }}" type="video/avi">
+      Your browser does not support video playback.
+    </video><br><br>
+    <a href="/download">Download Video</a>
+  {% endif %}
+</body>
+</html>
+'''
+
+def extract_faces_from_video(video_path):
+    faces = []
+    cap = cv2.VideoCapture(video_path)
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        locations = face_recognition.face_locations(frame)
+        for top, right, bottom, left in locations:
+            face = frame[top:bottom, left:right]
+            if face.size == 0:
+                continue
+            face_resized = cv2.resize(face, (128, 128))
+            faces.append(face_resized)
+    cap.release()
+    return faces
+
+def swap_faces(source_face_frame, target_frame):
+    src_loc = face_recognition.face_locations(source_face_frame)
+    tgt_loc = face_recognition.face_locations(target_frame)
+    if not src_loc or not tgt_loc:
+        return target_frame
+
+    s_top, s_right, s_bottom, s_left = src_loc[0]
+    t_top, t_right, t_bottom, t_left = tgt_loc[0]
+
+    source_face = source_face_frame[s_top:s_bottom, s_left:s_right]
+    if source_face.size == 0:
+        return target_frame
+
+    face_resized = cv2.resize(source_face, (t_right - t_left, t_bottom - t_top))
+    target_frame[t_top:t_bottom, t_left:t_right] = face_resized
+    return target_frame
+
+def process_video(source_path, target_path, output_path):
+    source_faces = extract_faces_from_video(source_path)
+    if not source_faces:
+        raise ValueError("No face found in source video.")
+
+    cap = cv2.VideoCapture(target_path)
+
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'XVID'), fps, (width, height))
+
+    i = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        swapped = swap_faces(source_faces[i % len(source_faces)], frame)
+        out.write(swapped)
+        i += 1
+
+    cap.release()
+    out.release()
+
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    video_generated = False
+
+    if request.method == 'POST':
+        source = request.files['source']
+        target = request.files['target']
+
+        source_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(source.filename))
+        target_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(target.filename))
+
+        source.save(source_path)
+        target.save(target_path)
+
+        try:
+            process_video(source_path, target_path, OUTPUT_FILE)
+            video_generated = True
+        except Exception as e:
+            return f"<h3>Error processing video: {str(e)}</h3>"
+
+    return render_template_string(HTML_TEMPLATE, video_generated=video_generated)
+
+@app.route('/download')
+def download():
+    return send_file(OUTPUT_FILE, as_attachment=True)
+
+if __name__ == '__main__':
+    app.run(debug=True)
